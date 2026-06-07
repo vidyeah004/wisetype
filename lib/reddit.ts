@@ -18,118 +18,120 @@ export interface ScoredPost extends RedditPost {
   draftedReply?: string
 }
 
-const SUBREDDITS = [
-  'CustomerSuccess',
-  'SaaS',
-  'customer_service',
-  'msp',
-  'helpdesk',
-  'Intercom',
-  'startups',
-]
-
-const SEARCH_QUERIES = [
-  'AI customer service platform recommendation',
-  'Intercom alternative',
-  'Zendesk alternative',
-  'customer support AI tool',
-]
-
 const KEYWORDS = [
   'customer service',
   'customer support',
-  'AI support',
+  'ai support',
   'intercom alternative',
   'zendesk alternative',
   'cs platform',
   'support tool',
-  'helpdesk ai',
+  'helpdesk',
   'ai agent',
   'support automation',
   'ticket automation',
   'customer service ai',
   'evaluating',
   'switching from',
-  'recommendation',
+  'what are you using',
+  'recommend',
+  'cx platform',
+  'live chat',
+  'support software',
 ]
 
-// Get a Reddit OAuth access token using app-only auth (no user login needed)
-async function getRedditToken(): Promise<string> {
-  const clientId = process.env.REDDIT_CLIENT_ID
-  const clientSecret = process.env.REDDIT_CLIENT_SECRET
+// Subreddit RSS feeds — no auth, no blocking
+const SUBREDDIT_FEEDS = [
+  'https://www.reddit.com/r/CustomerSuccess/new.json?limit=25&raw_json=1',
+  'https://www.reddit.com/r/SaaS/new.json?limit=25&raw_json=1',
+  'https://www.reddit.com/r/customer_service/new.json?limit=25&raw_json=1',
+  'https://www.reddit.com/r/helpdesk/new.json?limit=25&raw_json=1',
+  'https://www.reddit.com/r/msp/new.json?limit=25&raw_json=1',
+  'https://www.reddit.com/r/startups/new.json?limit=25&raw_json=1',
+]
 
-  if (!clientId || !clientSecret) {
-    throw new Error('Missing REDDIT_CLIENT_ID or REDDIT_CLIENT_SECRET env vars')
-  }
+// Targeted search URLs — hits Reddit's search directly
+const SEARCH_FEEDS = [
+  'https://www.reddit.com/search.json?q=customer+service+AI+platform&sort=new&limit=15&raw_json=1',
+  'https://www.reddit.com/search.json?q=intercom+alternative&sort=new&limit=15&raw_json=1',
+  'https://www.reddit.com/search.json?q=zendesk+alternative&sort=new&limit=15&raw_json=1',
+  'https://www.reddit.com/search.json?q=customer+support+software+recommendation&sort=new&limit=15&raw_json=1',
+]
 
-  const credentials = Buffer.from(`${clientId}:${clientSecret}`).toString('base64')
+// Rotate user agents to avoid blocks
+const USER_AGENTS = [
+  'Mozilla/5.0 (compatible; TypewiseRadar/1.0; research tool)',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+]
 
-  const res = await fetch('https://www.reddit.com/api/v1/access_token', {
-    method: 'POST',
-    headers: {
-      Authorization: `Basic ${credentials}`,
-      'Content-Type': 'application/x-www-form-urlencoded',
-      'User-Agent': 'TypewiseRadar/1.0 by u/typewise_radar',
-    },
-    body: 'grant_type=client_credentials',
-  })
-
-  if (!res.ok) {
-    const text = await res.text()
-    throw new Error(`Reddit OAuth failed: ${res.status} ${text}`)
-  }
-
-  const data = await res.json()
-  return data.access_token
+function randomUA() {
+  return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)]
 }
 
-async function redditFetch(token: string, path: string): Promise<RedditPost[]> {
-  const res = await fetch(`https://oauth.reddit.com${path}`, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'User-Agent': 'TypewiseRadar/1.0 by u/typewise_radar',
-    },
-  })
+async function fetchFeed(url: string): Promise<RedditPost[]> {
+  try {
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': randomUA(),
+        'Accept': 'application/json',
+      },
+      // No cache — always fresh
+      cache: 'no-store',
+    })
 
-  if (!res.ok) {
-    console.error(`Reddit fetch failed: ${res.status} for ${path}`)
+    if (!res.ok) {
+      console.error(`Feed fetch failed: ${res.status} for ${url}`)
+      return []
+    }
+
+    const data = await res.json()
+    const children = data?.data?.children ?? []
+
+    return children.map((c: { data: RedditPost }) => ({
+      id: c.data.id,
+      title: c.data.title ?? '',
+      selftext: c.data.selftext ?? '',
+      subreddit: c.data.subreddit ?? '',
+      url: c.data.url ?? '',
+      score: c.data.score ?? 0,
+      num_comments: c.data.num_comments ?? 0,
+      created_utc: c.data.created_utc ?? 0,
+      author: c.data.author ?? '',
+      permalink: c.data.permalink ?? '',
+    }))
+  } catch (err) {
+    console.error(`Feed error for ${url}:`, err)
     return []
   }
-
-  const data = await res.json()
-  return (data?.data?.children ?? []).map((c: { data: RedditPost }) => c.data)
 }
 
 export async function fetchRedditPosts(): Promise<RedditPost[]> {
-  const token = await getRedditToken()
-  const allPosts: RedditPost[] = []
+  const allUrls = [...SUBREDDIT_FEEDS, ...SEARCH_FEEDS]
 
-  // Fetch new posts from each subreddit
-  for (const sub of SUBREDDITS) {
-    const posts = await redditFetch(token, `/r/${sub}/new?limit=25`)
-    allPosts.push(...posts)
-  }
+  // Fetch all feeds in parallel
+  const results = await Promise.all(allUrls.map(fetchFeed))
+  const allPosts = results.flat()
 
-  // Search for high-intent queries
-  for (const q of SEARCH_QUERIES) {
-    const posts = await redditFetch(
-      token,
-      `/search?q=${encodeURIComponent(q)}&sort=new&limit=10&type=link`
-    )
-    allPosts.push(...posts)
-  }
+  console.log(`Raw posts fetched: ${allPosts.length}`)
 
-  // Deduplicate
+  // Deduplicate by id
   const seen = new Set<string>()
   const unique = allPosts.filter((p) => {
-    if (seen.has(p.id)) return false
+    if (!p.id || seen.has(p.id)) return false
     seen.add(p.id)
     return true
   })
 
-  // Keyword filter
-  return unique.filter((post) => {
+  console.log(`After dedup: ${unique.length}`)
+
+  // Keyword filter — loosened to catch more
+  const filtered = unique.filter((post) => {
     const text = `${post.title} ${post.selftext}`.toLowerCase()
     return KEYWORDS.some((kw) => text.includes(kw))
   })
+
+  console.log(`After keyword filter: ${filtered.length}`)
+
+  return filtered
 }
